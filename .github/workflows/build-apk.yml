@@ -1,0 +1,50 @@
+name: Build APK
+
+# Cloud build for the REA Agent phone app. The app's github_build tool
+# triggers this with a workflow_dispatch call, then downloads the APK
+# from the release this workflow publishes (the app's github_latest_apk
+# tool picks it up). Run it by hand from the Actions tab too.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK pieces
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+      - name: Build APK
+        run: |
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          PLAT="$ANDROID_HOME/platforms/android-34/android.jar"
+          VER_CODE=$((100+${{ github.run_number }}))
+          VER_NAME="3.1-ci-${{ github.run_number }}"
+          mkdir -p build/classes
+          sed -e "s/android:versionCode=\"[0-9]*\"/android:versionCode=\"$VER_CODE\"/" -e "s/android:versionName=\"[^\"]*\"/android:versionName=\"$VER_NAME\"/" source/AndroidManifest.xml > build/AndroidManifest.xml
+          "$BT/aapt2" link -o build/base.apk --manifest build/AndroidManifest.xml -I "$PLAT" --min-sdk-version 24 --target-sdk-version 34
+          javac -source 8 -target 8 -nowarn -bootclasspath "$PLAT:$BT/core-lambda-stubs.jar" -d build/classes source/app/src/com/rea/agent/*.java
+          "$BT/d8" --release --min-api 24 --lib "$PLAT" --output build build/classes/com/rea/agent/*.class
+          (cd build && zip -q base.apk classes.dex)
+          "$BT/zipalign" -f 4 build/base.apk build/aligned.apk
+          "$BT/apksigner" sign --ks debug.keystore --ks-key-alias rea --ks-pass pass:rea123456 --out rea-agent-ci.apk build/aligned.apk
+          sha256sum rea-agent-ci.apk
+          "$BT/apksigner" verify rea-agent-ci.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" rea-agent-ci.apk --title "REA Agent cloud build ${{ github.run_number }}" --notes "Automatic cloud build from the source/ folder. Install over any existing REA Agent (versionCode $((100+${{ github.run_number }})))."
