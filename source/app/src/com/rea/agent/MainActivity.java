@@ -39,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
     private static final int PICK_APK = 41;
+    private static final int PICK_FILE = 42;
     private static final int ACCENT = Color.parseColor("#6c8cff");
     private static final int BG = Color.parseColor("#0d1117");
     private static final int BUBBLE_AI = Color.parseColor("#1c2431");
@@ -120,6 +121,19 @@ public class MainActivity extends Activity {
         input.setMaxLines(4);
         input.setHorizontallyScrolling(false);
         inputWrap.addView(input);
+        Button attachB = new Button(this);
+        attachB.setText("+");
+        attachB.setTextSize(18);
+        attachB.setTextColor(Color.WHITE);
+        GradientDrawable agd = new GradientDrawable();
+        agd.setColor(Color.parseColor("#232c3b"));
+        agd.setShape(GradientDrawable.OVAL);
+        attachB.setBackground(agd);
+        LinearLayout.LayoutParams atp = new LinearLayout.LayoutParams(dp(44), dp(44));
+        atp.rightMargin = dp(6);
+        attachB.setLayoutParams(atp);
+        attachB.setOnClickListener(v -> pickAny());
+        row.addView(attachB);
         row.addView(inputWrap, new LinearLayout.LayoutParams(0, -2, 1f));
         Button send = new Button(this);
         send.setText("→");
@@ -142,6 +156,7 @@ public class MainActivity extends Activity {
         gear.setOnClickListener(v -> showSettings());
         nchat.setOnClickListener(v -> newChat());
         if (!loadHistory()) bubble("ai", WELCOME, false);
+        handleIncoming(getIntent());
     }
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
@@ -252,23 +267,42 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req != PICK_APK || res != RESULT_OK || data == null) return;
-        Uri uri = data.getData();
+        if (res != RESULT_OK || data == null) return;
+        if (req == PICK_APK) importUri(data.getData(), "picked.apk", true);
+        else if (req == PICK_FILE) importUri(data.getData(), null, false);
+    }
+
+    private void importUri(Uri uri, String fallbackName, boolean asApk) {
         new Thread(() -> {
             try {
-                String name = "picked.apk";
-                String p = uri.getLastPathSegment();
+                String name = fallbackName == null ? "attached" : fallbackName;
+                String p = uri == null ? null : uri.getLastPathSegment();
                 if (p != null && p.contains(".")) name = p.substring(p.lastIndexOf('/') + 1);
-                File f = new File(getCacheDir(), "target.apk");
+                if (name.contains(":")) name = name.substring(name.lastIndexOf(':') + 1);
+                boolean apkByExt = name.toLowerCase().endsWith(".apk");
+                File f = asApk || apkByExt ? new File(getCacheDir(), "target.apk") : new File(getExternalFilesDir(null), name);
                 InputStream in = getContentResolver().openInputStream(uri);
                 OutputStream out = new FileOutputStream(f);
                 byte[] buf = new byte[16384]; int n;
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                 in.close(); out.close();
-                apk.load(f, name);
-                log("loaded " + name + " (" + f.length() + " bytes)");
-            } catch (Exception e) { log("could not load apk: " + e); }
+                if (asApk || apkByExt) {
+                    apk.load(f, name);
+                    log("loaded " + name + " (" + f.length() + " bytes) for reverse engineering");
+                } else {
+                    bubble("user", "[attached file] " + name + " (" + f.length() + " bytes)", false);
+                    addMsg(new JSONObject().put("role", "user").put("content", "user attached a file: " + name + " (" + f.length() + " bytes), saved in the app folder. use read_file to read it; list_files shows everything available."));
+                    scrollToBottom();
+                }
+            } catch (Exception e) { log("could not import file: " + e); }
         }).start();
+    }
+
+    private void pickAny() {
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.setType("*/*");
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        startActivityForResult(Intent.createChooser(i, "Attach a file"), PICK_FILE);
     }
 
     private void pickApk() {
@@ -284,10 +318,11 @@ public class MainActivity extends Activity {
     "web_search (search the web, returns results with titles+urls); http_request (call any API: method, url, headers, body); " +
     "notes (your durable memory across chats: action 'save' appends, 'read' returns all); save_file (write a text file to the phone); " +
     "generate_image (create any picture from a text description; it is saved and shown in the chat, use it whenever the user wants an image, drawing, poster or illustration). " +
+    "Files: the + button in the chat bar lets the user attach ANY file (apk, zip, txt, json, csv) straight into the chat; an apk loads into analyze_apk right away, other files are readable with read_file and listed with list_files. " +
     "GitHub tools (need a token in settings): github_list (list the user's repos), github_read (read a file from a repo), " +
     "github_commit (create or update a file in a repo; the user confirms first), github_release (create a release and attach the APK; the user confirms first), " +
     "github_build (trigger the cloud build workflow on a repo and wait for the apk; the user confirms first; on success follow with github_latest_apk), " +
-    "github_latest_apk (download the latest release APK of a repo onto the phone). " +
+    "github_latest_apk (download the latest release APK of a repo onto the phone; an install button appears in the chat and the result carries the apk download link). " +
     "Rules you must keep: (1) some actions need the user's confirmation before they run; when a tool result starts with DECLINED, the user said no: do not retry silently, ask what to change. " +
     "(2) When a tool result starts with STOP RULE, that tool failed 3 times this session: stop calling it and tell the user what is blocked and what would fix it. " +
     "(3) Never guess values you can look up with a tool; if an input is missing and no tool can find it, ask the user. " +
@@ -359,7 +394,7 @@ public class MainActivity extends Activity {
                             String name = c.getString("name");
                             JSONObject args = c.has("arguments") ? new JSONObject(c.getString("arguments")) : new JSONObject();
                             if (name.equals("pick_apk")) { chip("waiting for you to tap attach"); runOnUiThread(this::pickApk); addMsg(new JSONObject().put("role", "tool").put("tool_call_id", calls.getJSONObject(i).getString("id")).put("content", "the picker is open, the user will choose an apk; analyze_apk works once it loads")); continue; }
-                            chip(name + (name.equals("fetch_url") ? ": " + args.optString("url", "") : (name.equals("github_commit") || name.equals("github_release") ? ": " + args.optString("repo", "") : "")));
+                            chip(name + (name.equals("fetch_url") ? ": " + args.optString("url", "") : (name.equals("github_commit") || name.equals("github_release") || name.equals("github_build") ? ": " + args.optString("repo", "") : "")));
                             String result;
                             int tier = tierOf(name, args);
                             if (tier >= 2) {
@@ -625,6 +660,8 @@ public class MainActivity extends Activity {
             if (name.equals("github_release")) return ghRelease(args.optString("repo", ""), args.optString("tag", ""), args.optString("name", ""), args.optString("body", ""), args.optString("apk_path", ""));
             if (name.equals("github_latest_apk")) return ghLatestApk(args.optString("repo", ""));
             if (name.equals("github_build")) return ghBuild(args.optString("repo", ""), args.optString("ref", "master"), args.optInt("wait_minutes", 8));
+            if (name.equals("list_files")) return listFiles();
+            if (name.equals("read_file")) return readFile(args.optString("filename", ""));
             return "unknown tool";
         } catch (Throwable t) { return "tool error: " + t; }
     }
@@ -825,6 +862,90 @@ public class MainActivity extends Activity {
         return best;
     }
 
+    private void handleIncoming(Intent i) {
+        if (i == null) return;
+        Uri s = (Uri) i.getParcelableExtra(Intent.EXTRA_STREAM);
+        if (s != null) {
+            String t = i.getType();
+            importUri(s, null, t != null && t.contains("android.package-archive"));
+            return;
+        }
+        if (i.getData() != null && Intent.ACTION_VIEW.equals(i.getAction())) {
+            String t = i.getType();
+            String d = i.getData().toString().toLowerCase();
+            importUri(i.getData(), null, (t != null && t.contains("android.package-archive")) || d.endsWith(".apk"));
+        }
+    }
+
+    private String listFiles() {
+        try {
+            File[] fs = getExternalFilesDir(null).listFiles();
+            if (fs == null || fs.length == 0) return "no files in the app folder yet; the user can attach one with the + button";
+            java.util.Arrays.sort(fs, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
+            StringBuilder sb = new StringBuilder();
+            int c = 0;
+            for (File f : fs) {
+                if (c++ >= 60) { sb.append("... more files not shown"); break; }
+                sb.append(f.getName()).append(" (").append(f.length()).append(" bytes");
+                if (f.getName().toLowerCase().endsWith(".apk")) sb.append(", apk: use pick_apk then analyze_apk");
+                sb.append(")\n");
+            }
+            return sb.toString();
+        } catch (Exception e) { return "error: " + e; }
+    }
+
+    private String readFile(String filename) {
+        try {
+            if (filename.isEmpty()) return "error: need filename (run list_files)";
+            if (filename.contains("/") || filename.contains("\\")) return "error: use a plain file name, no paths";
+            File dir = getExternalFilesDir(null);
+            File f = new File(dir, filename);
+            if (!f.getCanonicalPath().startsWith(dir.getCanonicalPath())) return "error: file outside the app folder";
+            if (!f.exists()) return "error: no such file, run list_files";
+            if (f.getName().toLowerCase().endsWith(".apk")) return "that is an apk: the user can load it with pick_apk or the + attach button, then you use analyze_apk";
+            FileInputStream fi = new FileInputStream(f);
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192]; int n; long total = 0;
+            while ((n = fi.read(buf)) > 0 && total < 200000) { bo.write(buf, 0, n); total += n; }
+            fi.close();
+            String s = bo.toString("UTF-8");
+            if (s.length() > 12000) s = s.substring(0, 12000) + "\n... (truncated; the file is " + f.length() + " bytes)";
+            return s.isEmpty() ? "(empty file)" : s;
+        } catch (Exception e) { return "error: " + e; }
+    }
+
+    private void showInstall(final File f) {
+        runOnUiThread(() -> {
+            try {
+                LinearLayout wrap = new LinearLayout(MainActivity.this);
+                wrap.setOrientation(LinearLayout.VERTICAL);
+                wrap.setGravity(Gravity.START);
+                LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(-2, -2);
+                wp.topMargin = dp(6);
+                wrap.setLayoutParams(wp);
+                Button ib = new Button(MainActivity.this);
+                ib.setText("install " + f.getName());
+                ib.setAllCaps(false);
+                ib.setTextColor(Color.WHITE);
+                GradientDrawable g = new GradientDrawable();
+                g.setColor(ACCENT);
+                g.setCornerRadius(dp(10));
+                ib.setBackground(g);
+                ib.setOnClickListener(v -> {
+                    try {
+                        Uri u = Uri.parse("content://com.rea.agent.files/" + Uri.encode(f.getName()));
+                        Intent i = new Intent(Intent.ACTION_VIEW);
+                        i.setDataAndType(u, "application/vnd.android.package-archive");
+                        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(i);
+                    } catch (Throwable t) { log("install failed: " + t); }
+                });
+                wrap.addView(ib);
+                chatList.post(() -> { chatList.addView(wrap); scrollToBottom(); });
+            } catch (Throwable ignored) { }
+        });
+    }
+
     private String ghBuild(String repo, String ref, int waitMinutes) {
         try {
             if (prefs.getString("gh_token", "").isEmpty()) return "error: no github token (settings).";
@@ -854,7 +975,7 @@ public class MainActivity extends Activity {
                         JSONObject run = runs.getJSONObject(0);
                         if (run.optString("status", "").equals("completed")) {
                             String con = run.optString("conclusion", "");
-                            if (con.equals("success")) return "cloud build succeeded on " + repo + "\nrun: " + run.optString("html_url", "") + "\nnext: call github_latest_apk with repo \"" + repo + "\" to download the built apk onto the phone.";
+                            if (con.equals("success")) return "cloud build succeeded on " + repo + "\nrun: " + run.optString("html_url", "") + "\nrelease (give this download link to the user): https://github.com/" + repo + "/releases/latest" + "\nnext: call github_latest_apk with repo \"" + repo + "\" to download the built apk onto the phone.";
                             return "cloud build " + con + " on " + repo + "\nrun: " + run.optString("html_url", "") + "\ncheck the run log, fix the repo, and build again.";
                         }
                     }
@@ -890,7 +1011,8 @@ public class MainActivity extends Activity {
             byte[] buf = new byte[16384]; int n; long total = 0;
             while ((n = in.read(buf)) > 0) { fo.write(buf, 0, n); total += n; }
             in.close(); fo.close();
-            return "downloaded " + aname + " (" + total + " bytes) from " + repo + " " + rel.optString("tag_name", "") + " to " + f.getAbsolutePath() + "\nrelease page: " + rel.optString("html_url", "") + "\nthe user can install it straight from their file manager.";
+            showInstall(f);
+            return "downloaded " + aname + " (" + total + " bytes) from " + repo + " " + rel.optString("tag_name", "") + " to " + f.getAbsolutePath() + "\nrelease page: " + rel.optString("html_url", "") + "\napk download link: " + url + "\nan install button is on screen; the user can also install it from their file manager.";
         } catch (Exception e) { return "error: " + e; }
     }
 
@@ -953,6 +1075,10 @@ public class MainActivity extends Activity {
         gb.put("ref", new JSONObject().put("type", "string").put("description", "optional branch to build, default master"));
         gb.put("wait_minutes", new JSONObject().put("type", "integer").put("description", "optional minutes to wait for the build, default 8"));
         t.put(tool("github_build", "Trigger the cloud build (workflow build-apk.yml) on a GitHub repo, wait for it to finish and report the result. On success the workflow publishes the freshly built APK as a new release; then call github_latest_apk to download it onto the phone. The user confirms before it runs.", new JSONObject().put("type", "object").put("properties", gb).put("required", new JSONArray().put("repo"))));
+        t.put(tool("list_files", "List the files in the app's folder on the phone (attached files, saved files, downloaded apks).", new JSONObject()));
+        JSONObject rf = new JSONObject();
+        rf.put("filename", new JSONObject().put("type", "string").put("description", "file name exactly as list_files shows it"));
+        t.put(tool("read_file", "Read a text file from the app's folder on the phone (an attached file or one saved with save_file). For APKs use analyze_apk instead.", new JSONObject().put("type", "object").put("properties", rf).put("required", new JSONArray().put("filename"))));
         return t;
     }
 
