@@ -55,11 +55,14 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = getSharedPreferences("rea", MODE_PRIVATE);
-        String migModel = prefs.getString("model", "");
-        SharedPreferences.Editor pe = prefs.edit();
-        if (migModel.contains("nvidia/")) pe.putString("model", "google/gemma-4-31b-it:free");
-        if (!prefs.contains("fallback_models")) pe.putString("fallback_models", "dots-studio/dots-3-note-preview:free, openrouter/free");
-        pe.apply();
+        if (!prefs.getBoolean("mig35_done", false)) {
+            String migModel = prefs.getString("model", "");
+            SharedPreferences.Editor pe = prefs.edit();
+            if (migModel.contains("gemma-4")) pe.putString("model", "nvidia/nemotron-3-ultra-550b-a55b:free");
+            if (!prefs.contains("fallback_models")) pe.putString("fallback_models", "dots-studio/dots-3-note-preview:free, openrouter/free");
+            pe.putBoolean("mig35_done", true);
+            pe.apply();
+        }
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
@@ -178,7 +181,7 @@ public class MainActivity extends Activity {
         final EditText ghTok = dlgField(p, "GitHub token (PAT, optional)");
         final EditText fbMods = dlgField(p, "Fallback models (comma separated)");
         baseUrl.setText(prefs.getString("base_url", "https://openrouter.ai/api/v1"));
-        model.setText(prefs.getString("model", "google/gemma-4-31b-it:free"));
+        model.setText(prefs.getString("model", "nvidia/nemotron-3-ultra-550b-a55b:free"));
         apiKey.setText(prefs.getString("api_key", ""));
         ghTok.setText(prefs.getString("gh_token", ""));
         fbMods.setText(prefs.getString("fallback_models", ""));
