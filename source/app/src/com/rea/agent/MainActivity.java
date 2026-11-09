@@ -55,6 +55,11 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = getSharedPreferences("rea", MODE_PRIVATE);
+        String migModel = prefs.getString("model", "");
+        SharedPreferences.Editor pe = prefs.edit();
+        if (migModel.contains("nvidia/")) pe.putString("model", "google/gemma-4-31b-it:free");
+        if (!prefs.contains("fallback_models")) pe.putString("fallback_models", "dots-studio/dots-3-note-preview:free, openrouter/free");
+        pe.apply();
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(BG);
@@ -171,19 +176,39 @@ public class MainActivity extends Activity {
         final EditText model = dlgField(p, "Model id");
         final EditText apiKey = dlgField(p, "API key");
         final EditText ghTok = dlgField(p, "GitHub token (PAT, optional)");
+        final EditText fbMods = dlgField(p, "Fallback models (comma separated)");
         baseUrl.setText(prefs.getString("base_url", "https://openrouter.ai/api/v1"));
-        model.setText(prefs.getString("model", "nvidia/nemotron-3-ultra-550b-a55b:free"));
+        model.setText(prefs.getString("model", "google/gemma-4-31b-it:free"));
         apiKey.setText(prefs.getString("api_key", ""));
         ghTok.setText(prefs.getString("gh_token", ""));
+        fbMods.setText(prefs.getString("fallback_models", ""));
         ab.setView(p);
         ab.setPositiveButton("save", (d, w) -> prefs.edit()
             .putString("base_url", baseUrl.getText().toString().trim())
             .putString("model", model.getText().toString().trim())
             .putString("api_key", apiKey.getText().toString().trim())
             .putString("gh_token", ghTok.getText().toString().trim())
+            .putString("fallback_models", fbMods.getText().toString().trim())
             .apply());
         ab.setNegativeButton("cancel", null);
         ab.show();
+    }
+
+    private JSONObject postChat(JSONObject body, String base, String key) throws Exception {
+        try {
+            return post(base + "/chat/completions", body, key);
+        } catch (Exception e) {
+            String fb = prefs.getString("fallback_models", "");
+            for (String m : fb.split(",")) {
+                String mm = m.trim();
+                if (mm.isEmpty() || mm.equals(body.optString("model"))) continue;
+                try {
+                    body.put("model", mm);
+                    return post(base + "/chat/completions", body, key);
+                } catch (Exception e2) { }
+            }
+            throw e;
+        }
     }
 
     private EditText dlgField(LinearLayout p, String hint) {
@@ -382,7 +407,7 @@ public class MainActivity extends Activity {
                         .put("messages", messages)
                         .put("max_tokens", 8192)
                         .put("tools", tools());
-                    JSONObject resp = post(base + "/chat/completions", body, key);
+                    JSONObject resp = postChat(body, base, key);
                     JSONObject msg = resp.getJSONArray("choices").getJSONObject(0).getJSONObject("message");
                     JSONObject outMsg = new JSONObject().put("role", "assistant");
                     if (msg.has("content") && !msg.isNull("content")) outMsg.put("content", msg.getString("content"));
