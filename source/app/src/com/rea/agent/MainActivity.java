@@ -286,6 +286,7 @@ public class MainActivity extends Activity {
     "generate_image (create any picture from a text description; it is saved and shown in the chat, use it whenever the user wants an image, drawing, poster or illustration). " +
     "GitHub tools (need a token in settings): github_list (list the user's repos), github_read (read a file from a repo), " +
     "github_commit (create or update a file in a repo; the user confirms first), github_release (create a release and attach the APK; the user confirms first), " +
+    "github_build (trigger the cloud build workflow on a repo and wait for the apk; the user confirms first; on success follow with github_latest_apk), " +
     "github_latest_apk (download the latest release APK of a repo onto the phone). " +
     "Rules you must keep: (1) some actions need the user's confirmation before they run; when a tool result starts with DECLINED, the user said no: do not retry silently, ask what to change. " +
     "(2) When a tool result starts with STOP RULE, that tool failed 3 times this session: stop calling it and tell the user what is blocked and what would fix it. " +
@@ -595,6 +596,7 @@ public class MainActivity extends Activity {
     private int tierOf(String name, JSONObject args) {
         if (name.equals("http_request")) return "GET".equalsIgnoreCase(args.optString("method", "GET")) ? T_AUDIT : T_CONFIRM;
         if (name.equals("github_commit") || name.equals("github_release")) return T_CONFIRM;
+        if (name.equals("github_build")) return T_CONFIRM;
         if (name.equals("save_file") || name.equals("generate_image") || name.equals("github_latest_apk")) return T_AUDIT;
         if (name.equals("notes")) return "save".equals(args.optString("action", "read")) ? T_AUDIT : T_AUTO;
         return T_AUTO;
@@ -622,6 +624,7 @@ public class MainActivity extends Activity {
             if (name.equals("github_commit")) return ghCommit(args.optString("repo", ""), args.optString("path", ""), args.optString("content", ""), args.optString("message", "update via REA"), args.optString("branch", ""));
             if (name.equals("github_release")) return ghRelease(args.optString("repo", ""), args.optString("tag", ""), args.optString("name", ""), args.optString("body", ""), args.optString("apk_path", ""));
             if (name.equals("github_latest_apk")) return ghLatestApk(args.optString("repo", ""));
+            if (name.equals("github_build")) return ghBuild(args.optString("repo", ""), args.optString("ref", "master"), args.optInt("wait_minutes", 8));
             return "unknown tool";
         } catch (Throwable t) { return "tool error: " + t; }
     }
@@ -822,6 +825,46 @@ public class MainActivity extends Activity {
         return best;
     }
 
+    private String ghBuild(String repo, String ref, int waitMinutes) {
+        try {
+            if (prefs.getString("gh_token", "").isEmpty()) return "error: no github token (settings).";
+            if (repo.isEmpty()) return "error: need repo (owner/name)";
+            if (ref.isEmpty()) ref = "master";
+            HttpURLConnection c = (HttpURLConnection) new URL("https://api.github.com/repos/" + repo + "/actions/workflows/build-apk.yml/dispatches").openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(20000); c.setReadTimeout(30000);
+            c.setRequestProperty("Authorization", "Bearer " + prefs.getString("gh_token", ""));
+            c.setRequestProperty("Accept", "application/vnd.github+json");
+            c.setRequestProperty("User-Agent", "rea-agent/3.2");
+            OutputStream os = c.getOutputStream();
+            os.write(("{\"ref\":\"" + ref + "\"}").getBytes(StandardCharsets.UTF_8));
+            os.close();
+            int code = c.getResponseCode();
+            if (code == 404) return "error: no build-apk.yml workflow in " + repo + " on " + ref + ". the repo needs .github/workflows/build-apk.yml (a workflow_dispatch build that publishes the apk as a release).";
+            if (code >= 300) { String es = ghReadAll(c); return "error: github " + code + ": " + es.substring(0, Math.min(300, es.length())); }
+            Thread.sleep(8000);
+            long deadline = System.currentTimeMillis() + waitMinutes * 60000L;
+            while (System.currentTimeMillis() < deadline) {
+                HttpURLConnection r = gh("https://api.github.com/repos/" + repo + "/actions/runs?event=workflow_dispatch&per_page=3");
+                String s = ghReadAll(r);
+                if (r.getResponseCode() < 400) {
+                    JSONArray runs = new JSONObject(s).optJSONArray("workflow_runs");
+                    if (runs != null && runs.length() > 0) {
+                        JSONObject run = runs.getJSONObject(0);
+                        if (run.optString("status", "").equals("completed")) {
+                            String con = run.optString("conclusion", "");
+                            if (con.equals("success")) return "cloud build succeeded on " + repo + "\nrun: " + run.optString("html_url", "") + "\nnext: call github_latest_apk with repo \"" + repo + "\" to download the built apk onto the phone.";
+                            return "cloud build " + con + " on " + repo + "\nrun: " + run.optString("html_url", "") + "\ncheck the run log, fix the repo, and build again.";
+                        }
+                    }
+                }
+                Thread.sleep(15000);
+            }
+            return "build still running after " + waitMinutes + " minutes; check https://github.com/" + repo + "/actions and call github_latest_apk once it finishes.";
+        } catch (Exception e) { return "error: " + e; }
+    }
+
     private String ghLatestApk(String repo) {
         try {
             if (prefs.getString("gh_token", "").isEmpty()) return "error: no github token (settings).";
@@ -905,6 +948,11 @@ public class MainActivity extends Activity {
         grel.put("apk_path", new JSONObject().put("type", "string").put("description", "optional path of an apk on this phone to attach; default is the loaded apk or the newest apk in the app folder"));
         t.put(tool("github_release", "Create a GitHub release and upload the APK to it, then return the release and apk download links. The user confirms before it runs.", new JSONObject().put("type", "object").put("properties", grel).put("required", new JSONArray().put("repo").put("tag"))));
         t.put(tool("github_latest_apk", "Download the latest release APK of a GitHub repo onto the phone so the user can install it from their file manager.", new JSONObject().put("type", "object").put("properties", new JSONObject().put("repo", grepo.get("repo"))).put("required", new JSONArray().put("repo"))));
+        JSONObject gb = new JSONObject();
+        gb.put("repo", grepo.get("repo"));
+        gb.put("ref", new JSONObject().put("type", "string").put("description", "optional branch to build, default master"));
+        gb.put("wait_minutes", new JSONObject().put("type", "integer").put("description", "optional minutes to wait for the build, default 8"));
+        t.put(tool("github_build", "Trigger the cloud build (workflow build-apk.yml) on a GitHub repo, wait for it to finish and report the result. On success the workflow publishes the freshly built APK as a new release; then call github_latest_apk to download it onto the phone. The user confirms before it runs.", new JSONObject().put("type", "object").put("properties", gb).put("required", new JSONArray().put("repo"))));
         return t;
     }
 
